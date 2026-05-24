@@ -1,8 +1,11 @@
 package main
 
 import (
-	"context"
-	"fmt"
+	"net/http"
+	"rate-limiter/internal/limiter"
+	"rate-limiter/internal/middleware"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func main() {
@@ -29,27 +32,71 @@ func main() {
 	// 	)
 	// }
 
-	r := newRedisLimiter(
+	// r := newRedisLimiter(
+	// 	"localhost:6379",
+	// 	5,
+	// 	1,
+	// )
+
+	// for i := 0; i < 10; i++ {
+
+	// 	d, err := r.Decide(
+	// 		context.Background(),
+	// 		"192.168.1.1",
+	// 	)
+
+	// 	if err != nil {
+	// 		panic(err)
+	// 	}
+
+	// 	fmt.Println(
+	// 		d.Allowed,
+	// 		d.Remaining,
+	// 		d.RetryAfter,
+	// 	)
+	// }
+
+	r := chi.NewRouter()
+
+	redisLimiter := limiter.NewRedisLimiter(
 		"localhost:6379",
-		5,
-		1,
+		10,
+		2,
 	)
 
-	for i := 0; i < 10; i++ {
+	localLimiter := limiter.NewLocalLimiter(
+		10,
+		2,
+	)
 
-		d, err := r.Decide(
-			context.Background(),
-			"192.168.1.1",
-		)
+	orchestrator := limiter.NewOrchestrator(
+		redisLimiter,
+		localLimiter,
+	)
 
-		if err != nil {
-			panic(err)
-		}
+	r.Use(
+		middleware.RateLimit(
+			orchestrator,
+		),
+	)
 
-		fmt.Println(
-			d.Allowed,
-			d.Remaining,
-			d.RetryAfter,
-		)
-	}
+	r.Get(
+		"/",
+		func(
+			w http.ResponseWriter,
+			r *http.Request,
+		) {
+
+			w.Write(
+				[]byte(
+					"hello",
+				),
+			)
+		},
+	)
+
+	http.ListenAndServe(
+		":8080",
+		r,
+	)
 }
