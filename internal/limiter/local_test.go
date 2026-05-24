@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -20,13 +21,13 @@ func TestTokenBucketAllowRequest(t *testing.T) {
 
 func TestLocalLimiterSeparatesKeys(t *testing.T) {
 	l := NewLocalLimiter(1, 0)
-	if decision, err := l.Decide(nil, "10.0.0.1"); err != nil || !decision.Allowed {
+	if decision, err := l.Decide(context.Background(), "10.0.0.1"); err != nil || !decision.Allowed {
 		t.Fatalf("expected first key request to be allowed, got decision=%+v err=%v", decision, err)
 	}
-	if decision, err := l.Decide(nil, "10.0.0.1"); err != nil || decision.Allowed {
+	if decision, err := l.Decide(context.Background(), "10.0.0.1"); err != nil || decision.Allowed {
 		t.Fatalf("expected second request for same key to be denied, got decision=%+v err=%v", decision, err)
 	}
-	if decision, err := l.Decide(nil, "10.0.0.2"); err != nil || !decision.Allowed {
+	if decision, err := l.Decide(context.Background(), "10.0.0.2"); err != nil || !decision.Allowed {
 		t.Fatalf("expected different key to have its own bucket, got decision=%+v err=%v", decision, err)
 	}
 }
