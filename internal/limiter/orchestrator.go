@@ -6,6 +6,14 @@ import (
 	"time"
 )
 
+type BreakerState string
+
+const (
+	BreakerClosed   BreakerState = "closed"
+	BreakerOpen     BreakerState = "open"
+	BreakerHalfOpen BreakerState = "half-open"
+)
+
 type Orchestrator struct {
 	redis Limiter
 	local Limiter
@@ -13,7 +21,7 @@ type Orchestrator struct {
 	failures  int
 	threshold int
 
-	state string
+	state BreakerState
 
 	lastFailureTime time.Time
 
@@ -29,7 +37,7 @@ func NewOrchestrator(
 		redis:     redis,
 		local:     local,
 		threshold: 3,
-		state:     "closed",
+		state:     BreakerClosed,
 	}
 }
 
@@ -43,7 +51,7 @@ func (o *Orchestrator) Decide(ctx context.Context, key string) (Decision, error)
 
 	currentState := o.state
 
-	if currentState == "open" {
+	if currentState == BreakerOpen {
 
 		if time.Since(
 			o.lastFailureTime,
@@ -57,8 +65,8 @@ func (o *Orchestrator) Decide(ctx context.Context, key string) (Decision, error)
 			)
 		}
 
-		o.state = "half-open"
-		currentState = "half-open"
+		o.state = BreakerHalfOpen
+		currentState = BreakerHalfOpen
 	}
 
 	o.mu.Unlock()
@@ -75,7 +83,7 @@ func (o *Orchestrator) Decide(ctx context.Context, key string) (Decision, error)
 		o.mu.Lock()
 
 		o.failures = 0
-		o.state = "closed"
+		o.state = BreakerClosed
 
 		o.mu.Unlock()
 
@@ -84,11 +92,11 @@ func (o *Orchestrator) Decide(ctx context.Context, key string) (Decision, error)
 
 	// ----- Redis failed in half-open mode -----
 
-	if currentState == "half-open" {
+	if currentState == BreakerHalfOpen {
 
 		o.mu.Lock()
 
-		o.state = "open"
+		o.state = BreakerOpen
 		o.lastFailureTime = time.Now()
 
 		o.mu.Unlock()
@@ -107,7 +115,7 @@ func (o *Orchestrator) Decide(ctx context.Context, key string) (Decision, error)
 	o.lastFailureTime = time.Now()
 
 	if o.failures >= o.threshold {
-		o.state = "open"
+		o.state = BreakerOpen
 	}
 
 	o.mu.Unlock()

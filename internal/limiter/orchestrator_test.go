@@ -70,7 +70,7 @@ func TestOrchestratorOpensBreakerAfterFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if o.state != "open" {
+	if o.state != BreakerOpen {
 		t.Fatalf("expected breaker to open, got %q", o.state)
 	}
 
@@ -90,7 +90,7 @@ func TestOrchestratorHalfOpenRetriesRedis(t *testing.T) {
 	redisLimiter := &stubLimiter{err: errors.New("redis down")}
 	localLimiter := &stubLimiter{decision: Decision{Allowed: true, Remaining: 2, Backend: "local"}}
 	o := NewOrchestrator(redisLimiter, localLimiter)
-	o.state = "open"
+	o.state = BreakerOpen
 	o.lastFailureTime = time.Now().Add(-6 * time.Second)
 
 	decision, err := o.Decide(context.Background(), "10.0.0.1")
@@ -100,10 +100,16 @@ func TestOrchestratorHalfOpenRetriesRedis(t *testing.T) {
 	if decision.Backend != "local" {
 		t.Fatalf("expected local fallback in half-open failure path, got %+v", decision)
 	}
-	if o.state != "open" {
+	if o.state != BreakerOpen {
 		t.Fatalf("expected breaker to remain open after half-open failure, got %q", o.state)
 	}
 	if redisLimiter.calls != 1 {
 		t.Fatalf("expected redis limiter to be attempted once, got %d", redisLimiter.calls)
+	}
+}
+
+func TestBreakerStateConstants(t *testing.T) {
+	if BreakerClosed != "closed" || BreakerOpen != "open" || BreakerHalfOpen != "half-open" {
+		t.Fatalf("unexpected breaker state constants: %q %q %q", BreakerClosed, BreakerOpen, BreakerHalfOpen)
 	}
 }

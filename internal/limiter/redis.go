@@ -2,6 +2,7 @@ package limiter
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -74,9 +75,13 @@ func (r *RedisLimiter) Decide(ctx context.Context, key string) (Decision, error)
 		return Decision{}, err
 	}
 
+	return parseTokenBucketResult(res)
+}
+
+func parseTokenBucketResult(res interface{}) (Decision, error) {
 	vals, ok := res.([]interface{})
 	if !ok || len(vals) < 3 {
-		return Decision{}, nil
+		return Decision{}, errors.New("invalid redis response")
 	}
 
 	toInt64 := func(v interface{}) int64 {
