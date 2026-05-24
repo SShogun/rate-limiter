@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"rate-limiter/internal/limiter"
 )
 
 func TestNewRedisLimiterReturnsWorkingLimiter(t *testing.T) {

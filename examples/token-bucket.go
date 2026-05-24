@@ -1,5 +1,7 @@
 package examples
 
+// this is a token bucket algorithm written by scratch
+
 import (
 	"math"
 	"sync"
