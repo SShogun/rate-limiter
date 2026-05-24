@@ -8,6 +8,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// RedisLimiter is the primary limiter. It uses Redis for the shared view of
+// the world and expects the Lua script to stay in lockstep with the Go code.
 type RedisLimiter struct {
 	client        *redis.Client
 	maxBucketSize float64
@@ -15,7 +17,7 @@ type RedisLimiter struct {
 }
 
 // NewRedisLimiter creates a Redis-backed token-bucket limiter. `max` is the
-// bucket capacity (tokens) and `refillRate` is tokens per second.
+// bucket capacity and `refillRate` is tokens per second.
 func NewRedisLimiter(addr string, max int, refillRate int) *RedisLimiter {
 	c := redis.NewClient(&redis.Options{Addr: addr})
 	return &RedisLimiter{
@@ -64,6 +66,8 @@ redis.call("HSET", key, "tokens", tokens, "last_refill", now)
 return {allowed, math.floor(tokens), retryAfter}
 `)
 
+// Decide executes the Lua token-bucket script and turns the result back into a
+// Decision. The script is the part that keeps the Redis path atomic.
 func (r *RedisLimiter) Decide(ctx context.Context, key string) (Decision, error) {
 	redisKey := "redis:" + key
 
@@ -78,6 +82,8 @@ func (r *RedisLimiter) Decide(ctx context.Context, key string) (Decision, error)
 	return parseTokenBucketResult(res)
 }
 
+// parseTokenBucketResult keeps the Lua result handling in one place. The code
+// is a little defensive here because bad Redis responses should fail loudly.
 func parseTokenBucketResult(res interface{}) (Decision, error) {
 	vals, ok := res.([]interface{})
 	if !ok || len(vals) < 3 {

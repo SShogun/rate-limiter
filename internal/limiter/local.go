@@ -12,6 +12,9 @@ const (
 	defaultCleanupInterval = 1 * time.Minute
 )
 
+// TokenBucket is the in-memory bucket used for the fallback path. It is kept
+// intentionally simple because this is the code that gets exercised when Redis
+// is misbehaving.
 type TokenBucket struct {
 	mu                sync.Mutex
 	maxBucketSize     float64
@@ -21,6 +24,8 @@ type TokenBucket struct {
 	lastAccess        time.Time
 }
 
+// LocalLimiter keeps a bucket per key in memory. It trades memory for speed,
+// which is the right call for a fallback path that should never block on IO.
 type LocalLimiter struct {
 	mu            sync.RWMutex
 	buckets       map[string]*TokenBucket
@@ -29,6 +34,8 @@ type LocalLimiter struct {
 	bucketTTL     time.Duration
 }
 
+// NewTokenBucket creates a bucket already full. That's the common case and it
+// avoids a separate warm-up step.
 func NewTokenBucket(maxBucketSize float64, refillRate float64) *TokenBucket {
 	return &TokenBucket{
 		maxBucketSize:     maxBucketSize,
@@ -56,30 +63,41 @@ func (tb *TokenBucket) refill() {
 	tb.lastRefillTime = now
 }
 
+func (tb *TokenBucket) remainingAndRetryLocked() (int, time.Duration) {
+	remaining := int(math.Floor(tb.currentBucketSize))
+	if remaining >= 1 || tb.refillRate <= 0 {
+		return remaining, 0
+	}
+
+	seconds := (1 - tb.currentBucketSize) / tb.refillRate
+	if seconds <= 0 {
+		return remaining, 0
+	}
+	return remaining, time.Duration(seconds * float64(time.Second))
+}
+
+// RemainingTokens reports the current number of tokens after applying a refill
+// based on the wall clock.
 func (tb *TokenBucket) RemainingTokens() int {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
 	tb.refill()
-	return int(math.Floor(tb.currentBucketSize))
+	remaining, _ := tb.remainingAndRetryLocked()
+	return remaining
 }
 
+// RetryAfter estimates how long the caller should wait before retrying.
 func (tb *TokenBucket) RetryAfter() time.Duration {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
 	tb.refill()
-	if tb.currentBucketSize >= 1 || tb.refillRate <= 0 {
-		return 0
-	}
-
-	seconds := (1 - tb.currentBucketSize) / tb.refillRate
-	if seconds < 0 {
-		return 0
-	}
-	return time.Duration(seconds * float64(time.Second))
+	_, retry := tb.remainingAndRetryLocked()
+	return retry
 }
 
+// AllowRequest spends tokens if they are available.
 func (tb *TokenBucket) AllowRequest(tokens int) bool {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
@@ -94,6 +112,8 @@ func (tb *TokenBucket) AllowRequest(tokens int) bool {
 	return false
 }
 
+// NewLocalLimiter returns the fallback limiter used when Redis is down or the
+// breaker is open.
 func NewLocalLimiter(maxBucketSize float64, refillRate float64) *LocalLimiter {
 	l := &LocalLimiter{
 		buckets:       make(map[string]*TokenBucket),
@@ -128,6 +148,7 @@ func (l *LocalLimiter) getBucket(key string) *TokenBucket {
 }
 
 func (l *LocalLimiter) cleanupLoop(interval time.Duration) {
+	// This is a bit ugly, but it avoids dragging cleanup into the hot path.
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -151,6 +172,9 @@ func (l *LocalLimiter) cleanupExpiredBuckets(now time.Time) {
 	}
 }
 
+// Decide applies the token bucket and returns a fully populated Decision. The
+// middleware depends on the headers, so we keep the response shape consistent
+// even in fallback mode.
 func (l *LocalLimiter) Decide(ctx context.Context, key string) (Decision, error) {
 	select {
 	case <-ctx.Done():
@@ -160,13 +184,17 @@ func (l *LocalLimiter) Decide(ctx context.Context, key string) (Decision, error)
 
 	b := l.getBucket(key)
 	allowed := b.AllowRequest(1)
+	b.mu.Lock()
+	remaining, retry := b.remainingAndRetryLocked()
+	b.mu.Unlock()
+
 	decision := Decision{
 		Allowed:   allowed,
-		Remaining: b.RemainingTokens(),
+		Remaining: remaining,
 		Backend:   "local",
 	}
 	if !allowed {
-		decision.RetryAfter = b.RetryAfter()
+		decision.RetryAfter = retry
 	}
 	return decision, nil
 }

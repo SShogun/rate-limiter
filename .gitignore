@@ -1,0 +1,19 @@
+# Binaries
+bin/
+*.exe
+*.test
+*.out
+
+# Coverage
+coverage.out
+*.coverprofile
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Go workspace cache
+go.work
+go.work.sum
