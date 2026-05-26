@@ -107,7 +107,7 @@ The circuit breaker moves between three states based on Redis health:
 stateDiagram-v2
     state Closed
     state Open
-    state HalfOpen as "Half-Open"
+    state "Half-Open" as HalfOpen
 
     [*] --> Closed
     
