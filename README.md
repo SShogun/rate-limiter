@@ -18,22 +18,114 @@ This is not a framework demo. It is a practical learning project that tries to a
 - Tests for limiter behavior, middleware behavior, and the breaker.
 - Benchmarks for the hot paths.
 
+## What is a Rate Limiter? (The Layman's Guide)
+
+Before diving into the code, it helps to understand what a rate limiter actually is and why it's a staple of modern web applications.
+
+### The Analogy: The Club Bouncer
+Imagine a popular nightclub with a strict capacity limit. If everyone rushed the door all at once, the club would get dangerously overcrowded, the staff would be overwhelmed, and the experience would be ruined for all the guests. 
+
+To prevent this, the club hires a **bouncer** to stand at the entrance. The bouncer's job is to control the rate at which people enter (e.g., allowing at most 5 people in per minute). If you arrive when the limit has been reached, the bouncer tells you to wait.
+
+In web systems, a **Rate Limiter** is that bouncer. It stands in front of your server or API and controls the frequency of incoming traffic.
+
+### Why do we use it?
+1. **Preventing Abuse & Denial of Service (DoS):** If a malicious script or bot sends millions of requests to your server in seconds, it can crash your system. A rate limiter stops them early before they consume server resources.
+2. **Ensuring Fairness (No Resource Hogging):** If one user runs a heavy script that queries your database constantly, it could slow down the application for everyone else. Rate limiting ensures fair access across all users.
+3. **Cost Management:** Many APIs cost money to run (e.g., database queries, third-party AI APIs, email delivery). Limiting requests prevents unexpected cloud bills.
+4. **Graceful Degradation:** Instead of crashing under unexpected traffic spikes, the server rejects excess traffic early, keeping the core system healthy.
+
+### The Token Bucket Algorithm (How this project works)
+This rate limiter uses the **Token Bucket** algorithm, which is one of the most common and intuitive rate-limiting strategies:
+* Imagine a bucket that holds a maximum number of tokens (e.g., 10 tokens).
+* Every request a user makes requires taking one token out of the bucket.
+* If there are tokens in the bucket, the request is **allowed**, and a token is removed.
+* If the bucket is empty, the request is **blocked** (throttled) with an HTTP `429 Too Many Requests` response.
+* The bucket constantly refills with tokens at a steady rate (e.g., 2 tokens per second) up to its maximum capacity.
+
+---
+
 ## Why this exists
 
 I wanted a rate limiter that was small enough to read in one sitting, but still had the moving parts you would expect in a real service: shared state, fallback behavior, and a bit of failure handling. A lot of sample code stops at `go run`; this one tries to be useful when the network is flaky.
 
-## How it works
+---
 
-The request flow is intentionally straightforward:
+## Architecture & How it Works
 
-1. Middleware extracts the client IP.
-2. The orchestrator asks Redis first.
-3. If Redis succeeds, that decision wins.
-4. If Redis fails, the breaker counts it and the local limiter takes over.
-5. Once the breaker trips, Redis is skipped for a short cooldown window.
-6. After the cooldown, Redis gets another chance in half-open mode.
+Most production rate limiters store their token bucket data in a shared cache like **Redis**. This is because multiple copies of your application might be running behind a load balancer, and they all need to share the same record of how many tokens a user has left.
 
-The local limiter is an in-memory token bucket keyed by client IP. It is cheap, fast, and disposable. That is the right trade-off for fallback logic.
+But what happens if **Redis goes down, gets slow, or the network flips**? 
+If you rely *only* on Redis, your entire website might crash or hang. 
+
+This project solves that by using a **Hybrid / Resilient Architecture**:
+1. **Primary Path (Redis):** The orchestrator checks a shared Redis instance to enforce global limits.
+2. **Fallback Path (Local In-Memory):** If Redis fails or becomes slow, the orchestrator bypasses it and falls back to a fast, process-local in-memory token bucket.
+3. **Circuit Breaker:** A circuit breaker monitors Redis health. If Redis fails 3 times in a row, the breaker "trips" (opens), immediately routing all traffic to the local fallback without attempting to contact Redis. This protects your application's response times from database network issues.
+
+### Request Flow Diagram
+
+The diagram below illustrates how a request from a client is evaluated by the orchestrator:
+
+```mermaid
+graph TD
+    Client([Client Request]) --> MW[HTTP Middleware]
+    MW -->|Extracts Client IP| Orch[Orchestrator]
+    Orch --> CB_State{Breaker State?}
+
+    %% Closed Path
+    CB_State -->|Closed| TryRedis[Query Redis Backend]
+    TryRedis -->|Success| RedisOK[Return Redis Decision]
+    TryRedis -->|Failure| IncFailures[Increment Failure Count]
+    IncFailures --> HitThreshold{Failures >= 3?}
+    HitThreshold -->|Yes| TripBreaker[Transition to Open State]
+    HitThreshold -->|No| FallbackLocal[Query Local Memory Bucket]
+    TripBreaker --> FallbackLocal
+
+    %% Open Path
+    CB_State -->|Open| CheckTime{Cooldown > 5s?}
+    CheckTime -->|No| LocalOnly[Query Local Memory Bucket]
+    CheckTime -->|Yes| SetHalfOpen[Transition to Half-Open]
+    SetHalfOpen --> TryRedisHalf[Query Redis Backend]
+
+    %% Half-Open Path
+    CB_State -->|Half-Open| TryRedisHalf
+    TryRedisHalf -->|Success| ResetRedis[Reset Failures & Closed State]
+    ResetRedis --> RedisOK
+    TryRedisHalf -->|Failure| TripBreakerAgain[Re-open Breaker & Reset Cooldown]
+    TripBreakerAgain --> FallbackLocal
+
+    FallbackLocal --> ReturnLocal([Return Local Decision])
+    LocalOnly --> ReturnLocal
+```
+
+### Circuit Breaker States
+
+The circuit breaker moves between three states based on Redis health:
+
+```mermaid
+stateDiagram-v2
+    state Closed
+    state Open
+    state HalfOpen as "Half-Open"
+
+    [*] --> Closed
+    
+    Closed --> Open : Redis fails 3 times
+    Closed --> Closed : Redis succeeds (resets failures)
+    
+    Open --> Open : Cooldown < 5s (bypasses Redis)
+    Open --> HalfOpen : Cooldown >= 5s (probes next request)
+    
+    HalfOpen --> Closed : Redis succeeds (system restored)
+    HalfOpen --> Open : Redis fails (resets cooldown)
+```
+
+1. **Closed (Healthy System):** Redis is healthy. All rate limiting queries go directly to Redis.
+2. **Open (Redis Unhealthy):** Redis is failing. The orchestrator stops calling Redis entirely and routes all traffic to the local in-memory token bucket. This state persists for a **5-second cooldown window** to give Redis time to recover.
+3. **Half-Open (Testing System):** Once the 5-second cooldown expires, the next request is sent to Redis as a "probe". 
+   - If that probe **succeeds**, the breaker closes, and Redis becomes the primary path again.
+   - If that probe **fails**, the breaker immediately re-opens for another 5 seconds, keeping the local fallback active.
 
 ## Project structure
 
